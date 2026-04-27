@@ -1,0 +1,8 @@
+{
+  "name": "LocaScan",
+  "description": "A dynamic QR and GPS-based attendance tracking system for students and lecturers.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
