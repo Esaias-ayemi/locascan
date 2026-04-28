@@ -13,7 +13,8 @@ const firebaseConfig: FirebaseOptions = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, localConfig.firestoreDatabaseId);
+const databaseId = import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || localConfig.firestoreDatabaseId;
+export const db = getFirestore(app, databaseId);
 export const auth = getAuth(app);
 
 // Connectivity check
