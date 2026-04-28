@@ -595,11 +595,12 @@ const Login = ({ setUser }: { setUser: (u: User) => void }) => {
       }
     } catch (err: any) {
       console.error("Auth error:", err);
-      let message = 'Something went wrong';
+      let message = err.message || 'Something went wrong';
       if (err.code === 'auth/email-already-in-use') message = 'Email already in use';
       if (err.code === 'auth/invalid-credential') message = 'Invalid email or password';
       if (err.code === 'auth/weak-password') message = 'Password should be at least 6 characters';
       if (err.code === 'auth/network-request-failed') message = 'Network error. Please check your connection.';
+      if (err.code === 'auth/operation-not-allowed') message = 'Email/password login is not enabled in Firebase Console. Please enable it in Authentication > Sign-in method.';
       setError(message);
     } finally {
       setLoading(false);
