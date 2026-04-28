@@ -1,6 +1,6 @@
 {
   "name": "LocaScan",
-  "description": "A dynamic QR and GPS-based attendance tracking system for students and lecturers.",
+  "description": "Secure QR and GPS-based attendance for educational institutions.",
   "requestFramePermissions": [
     "camera",
     "geolocation"

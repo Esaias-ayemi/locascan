@@ -1,0 +1,114 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['name', 'email', 'role']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.email is string && data.email.matches('^[^@]+@[^@]+\\.[^@]+$') &&
+             data.role in ['student', 'lecturer'] &&
+             (data.get('matric_number', null) == null || data.matric_number is string) &&
+             (data.get('staff_id', null) == null || data.staff_id is string);
+    }
+
+    function isValidCourse(data) {
+      return data.keys().hasAll(['course_code', 'course_title', 'lecturer_id', 'level', 'department']) &&
+             data.course_code is string && data.course_code.size() <= 20 &&
+             data.course_title is string && data.course_title.size() <= 200 &&
+             data.lecturer_id == request.auth.uid &&
+             data.level is string &&
+             data.department is string;
+    }
+
+    function isValidSession(data) {
+      return data.keys().hasAll(['course_id', 'lecturer_id', 'qr_token', 'latitude', 'longitude', 'radius_meters', 'expires_at', 'is_active', 'created_at']) &&
+             data.lecturer_id == request.auth.uid &&
+             data.latitude is number &&
+             data.longitude is number &&
+             data.radius_meters is number;
+    }
+
+    function isValidAttendance(data) {
+      return data.keys().hasAll(['session_id', 'student_id', 'latitude', 'longitude', 'marked_at']) &&
+             data.student_id == request.auth.uid &&
+             data.latitude is number &&
+             data.longitude is number &&
+             data.marked_at == request.time;
+    }
+
+    // --- Collections ---
+
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn(); // In this app students might need to see lecturer names
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidUser(incoming()) && 
+                    incoming().diff(existing()).affectedKeys().hasOnly(['name', 'onboarding_completed', 'level', 'department', 'matric_number', 'staff_id', 'phone_number']);
+    }
+
+    match /courses/{courseId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'lecturer' && isValidCourse(incoming());
+      allow update: if isSignedIn() && existing().lecturer_id == request.auth.uid && isValidCourse(incoming());
+      allow delete: if isSignedIn() && existing().lecturer_id == request.auth.uid;
+    }
+
+    match /course_registrations/{registrationId} {
+      allow read: if isSignedIn() && (resource.data.student_id == request.auth.uid || 
+                    get(/databases/$(database)/documents/courses/$(resource.data.course_id)).data.lecturer_id == request.auth.uid);
+      allow create: if isSignedIn() && incoming().student_id == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.student_id == request.auth.uid;
+    }
+
+    match /semester_registrations/{registrationId} {
+      allow read: if isSignedIn() && resource.data.student_id == request.auth.uid;
+      allow create: if isSignedIn() && incoming().student_id == request.auth.uid;
+    }
+
+    match /sessions/{sessionId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'lecturer' && isValidSession(incoming());
+      allow update: if isSignedIn() && (existing().lecturer_id == request.auth.uid || 
+                    (incoming().diff(existing()).affectedKeys().hasOnly(['qr_token', 'expires_at']) && existing().lecturer_id == request.auth.uid));
+    }
+
+    match /attendance/{attendanceId} {
+      allow read: if isSignedIn() && (resource.data.student_id == request.auth.uid || 
+                    get(/databases/$(database)/documents/sessions/$(resource.data.session_id)).data.lecturer_id == request.auth.uid);
+      allow create: if isSignedIn() && isValidAttendance(incoming()) && 
+                    getAfter(/databases/$(database)/documents/sessions/$(incoming().session_id)).data.is_active == true;
+    }
+  }
+}

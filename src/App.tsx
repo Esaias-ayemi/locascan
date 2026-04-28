@@ -31,13 +31,47 @@ import {
   ArrowRight,
   Zap,
   Globe,
-  ShieldCheck
+  ShieldCheck,
+  Building2,
+  Phone
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import axios from 'axios';
 import { QRCodeSVG } from 'qrcode.react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
 import { cn } from './lib/utils';
+import { 
+  db, 
+  auth, 
+  handleFirestoreError, 
+  OperationType 
+} from './lib/firebase';
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged,
+  sendPasswordResetEmail,
+  confirmPasswordReset
+} from 'firebase/auth';
+import { 
+  doc, 
+  getDoc, 
+  setDoc, 
+  updateDoc, 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  addDoc, 
+  serverTimestamp,
+  orderBy,
+  limit,
+  deleteDoc,
+  onSnapshot,
+  increment,
+  writeBatch,
+  Timestamp
+} from 'firebase/firestore';
 
 // --- Types ---
 interface User {
@@ -62,6 +96,7 @@ interface Course {
 interface Session {
   id: string;
   course_id: string;
+  lecturer_id: string;
   qr_token: string;
   latitude: number;
   longitude: number;
@@ -70,18 +105,24 @@ interface Session {
   is_active: boolean;
 }
 
-// --- API Config ---
-const api = axios.create({
-  baseURL: '/api',
-});
+// --- API Config removed, using Firebase directly ---
 
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token');
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
-  return config;
-});
+// --- Utilities ---
+
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const R = 6371e3; // metres
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) *
+    Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c; // in metres
+}
 
 // --- Components ---
 
@@ -137,6 +178,8 @@ const Card = ({ children, className }: { children: React.ReactNode; className?: 
   </div>
 );
 
+// --- Onboarding ---
+
 const Onboarding = ({ user, onComplete }: { user: User; onComplete: (u: User) => void }) => {
   const [formData, setFormData] = useState({
     name: user.name || '',
@@ -154,11 +197,18 @@ const Onboarding = ({ user, onComplete }: { user: User; onComplete: (u: User) =>
     setLoading(true);
     setError('');
     try {
-      await api.put('/profile', { ...formData, onboarding_completed: true });
-      const res = await api.get('/profile');
-      onComplete(res.data);
+      const userRef = doc(db, 'users', user.id);
+      await updateDoc(userRef, { 
+        ...formData, 
+        onboarding_completed: true 
+      });
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        const updatedUser = { id: userSnap.id, ...userSnap.data() } as User;
+        onComplete(updatedUser);
+      }
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to complete onboarding');
+      handleFirestoreError(err, OperationType.UPDATE, `users/${user.id}`);
     } finally {
       setLoading(false);
     }
@@ -357,9 +407,6 @@ const LandingPage = () => {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6 }}
           >
-            <span className="inline-block px-4 py-1.5 bg-navy-50 text-navy-600 rounded-full text-xs font-bold uppercase tracking-widest mb-6">
-              Next-Gen Attendance Tracking
-            </span>
             <h1 className="text-6xl md:text-8xl font-bold tracking-tight leading-[0.9] mb-8">
               Secure. Bi-Modal.<br />
               <span className="text-zinc-400 italic">Seamless.</span>
@@ -457,7 +504,7 @@ const LandingPage = () => {
           </div>
           <div className="relative">
             <div className="absolute -inset-4 bg-gradient-to-tr from-navy-500 to-blue-500 rounded-[3rem] blur-2xl opacity-20 animate-pulse" />
-            <div className="relative bg-navy-900 rounded-[3rem] p-12 text-white aspect-square flex flex-col justify-center">
+            <div className="relative bg-[#031a2f] rounded-[3rem] p-12 text-white aspect-square flex flex-col justify-center">
               <div className="space-y-6">
                 <div className="text-6xl font-bold">99.9%</div>
                 <div className="text-xl opacity-80 uppercase tracking-widest font-medium">Accuracy Rate</div>
@@ -515,29 +562,45 @@ const Login = ({ setUser }: { setUser: (u: User) => void }) => {
     setSuccess('');
     try {
       if (isResetPassword) {
-        await api.post('/auth/reset-password', { token: resetToken, newPassword });
+        await confirmPasswordReset(auth, resetToken, newPassword);
         setSuccess('Password reset successful! Please login.');
         setIsResetPassword(false);
         setIsForgotPassword(false);
       } else if (isForgotPassword) {
-        const res = await api.post('/auth/forgot-password', { email });
-        setSuccess(res.data.message);
-        if (res.data.debugToken) {
-          console.log("Debug Token (Normal in test env):", res.data.debugToken);
-          setResetToken(res.data.debugToken); // Auto-fill for convenience in this environment
-          setIsResetPassword(true);
-        }
+        await sendPasswordResetEmail(auth, email);
+        setSuccess('If an account exists, a reset email has been sent.');
       } else if (isRegister) {
-        await api.post('/auth/register', { name, email, password, role });
-        setIsRegister(false);
-        setSuccess('Registration successful! Please login.');
+        const userCred = await createUserWithEmailAndPassword(auth, email, password);
+        try {
+          // Create user profile in Firestore
+          await setDoc(doc(db, 'users', userCred.user.uid), {
+            id: userCred.user.uid,
+            name,
+            email,
+            role,
+            onboarding_completed: false,
+            created_at: serverTimestamp()
+          });
+          setIsRegister(false);
+          setSuccess('Registration successful! Please login.');
+        } catch (dbErr: any) {
+          console.error("Firestore creation error:", dbErr);
+          // If Firestore fails, we should ideally clean up the Auth user,
+          // but for now we just show a specific error
+          setError(`Account created, but profile setup failed: ${dbErr.message || 'Permission denied'}`);
+        }
       } else {
-        const res = await api.post('/auth/login', { email, password });
-        localStorage.setItem('token', res.data.token);
-        setUser(res.data.user);
+        await signInWithEmailAndPassword(auth, email, password);
+        // User state will be handled by onAuthStateChanged in App
       }
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Something went wrong');
+      console.error("Auth error:", err);
+      let message = 'Something went wrong';
+      if (err.code === 'auth/email-already-in-use') message = 'Email already in use';
+      if (err.code === 'auth/invalid-credential') message = 'Invalid email or password';
+      if (err.code === 'auth/weak-password') message = 'Password should be at least 6 characters';
+      if (err.code === 'auth/network-request-failed') message = 'Network error. Please check your connection.';
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -778,49 +841,111 @@ const LecturerDashboard = ({ user, onLogout }: { user: User; onLogout: () => voi
   }, [activeSession]);
 
   const fetchCourses = async () => {
-    const res = await api.get('/courses');
-    setCourses(res.data);
+    try {
+      const q = query(collection(db, 'courses'), where('lecturer_id', '==', user.id));
+      const querySnapshot = await getDocs(q);
+      const coursesData = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setCourses(coursesData);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.LIST, 'courses');
+    }
   };
 
   const fetchCourseStats = async () => {
-    const res = await api.get('/lecturer/courses/stats');
-    setCourseStats(res.data);
+    try {
+      // In a real app, this would be optimized. Here we'll fetch basic data.
+      const coursesQ = query(collection(db, 'courses'), where('lecturer_id', '==', user.id));
+      const coursesSnap = await getDocs(coursesQ);
+      const stats = await Promise.all(coursesSnap.docs.map(async (courseDoc) => {
+        const courseData = courseDoc.data();
+        
+        // Count sessions
+        const sessionsQ = query(collection(db, 'sessions'), where('course_id', '==', courseDoc.id));
+        const sessionsSnap = await getDocs(sessionsQ);
+        
+        // Count registrations
+        const registrationsQ = query(collection(db, 'course_registrations'), where('course_id', '==', courseDoc.id));
+        const registrationsSnap = await getDocs(registrationsQ);
+        
+        return {
+          id: courseDoc.id,
+          course_code: courseData.course_code,
+          course_title: courseData.course_title,
+          total_sessions: sessionsSnap.size,
+          total_students: registrationsSnap.size,
+          students_attended_at_least_once: 0 // Simplification for now
+        };
+      }));
+      setCourseStats(stats);
+    } catch (err) {
+      console.error("Error fetching stats:", err);
+    }
   };
 
   const fetchActiveSession = async (courseId: string) => {
-    const res = await api.get(`/sessions/active/${courseId}`);
-    setActiveSession(res.data);
+    const q = query(
+      collection(db, 'sessions'), 
+      where('course_id', '==', courseId), 
+      where('is_active', '==', true),
+      orderBy('created_at', 'desc'),
+      limit(1)
+    );
+    const snap = await getDocs(q);
+    if (!snap.empty) {
+      setActiveSession({ id: snap.docs[0].id, ...snap.docs[0].data() } as Session);
+    } else {
+      setActiveSession(null);
+    }
   };
 
   const fetchCourseSessions = async (courseId: string) => {
-    const res = await api.get(`/lecturer/course/${courseId}/sessions`);
-    setSelectedCourseSessions(res.data);
+    const q = query(collection(db, 'sessions'), where('course_id', '==', courseId), orderBy('created_at', 'desc'));
+    const snap = await getDocs(q);
+    const sessions = await Promise.all(snap.docs.map(async (sDoc) => {
+      const attendanceQ = query(collection(db, 'attendance'), where('session_id', '==', sDoc.id));
+      const attendanceSnap = await getDocs(attendanceQ);
+      return { id: sDoc.id, ...sDoc.data(), attendance_count: attendanceSnap.size };
+    }));
+    setSelectedCourseSessions(sessions);
   };
 
   const fetchSessionAttendance = async (sessionId: string) => {
-    const res = await api.get(`/lecturer/session/${sessionId}/attendance`);
-    setSessionAttendance(res.data);
+    const q = query(collection(db, 'attendance'), where('session_id', '==', sessionId));
+    const snap = await getDocs(q);
+    const attendance = await Promise.all(snap.docs.map(async (aDoc) => {
+      const aData = aDoc.data();
+      const uSnap = await getDoc(doc(db, 'users', aData.student_id));
+      const uData = uSnap.data();
+      return { 
+        name: uData?.name || 'Unknown', 
+        matric_number: uData?.matric_number || 'N/A', 
+        signed_in_at: aData.marked_at?.toDate?.()?.toISOString() || aData.marked_at 
+      };
+    }));
+    setSessionAttendance(attendance);
   };
 
   const addCourse = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     try {
-      await api.post('/courses', { 
-        course_code: newCourse.code, 
+      await addDoc(collection(db, 'courses'), {
+        course_code: newCourse.code,
         course_title: newCourse.title,
+        lecturer_id: user.id,
         level: newCourse.level,
         department: newCourse.department,
         required_attendance: parseInt(newCourse.required_attendance),
-        expected_classes: parseInt(newCourse.expected_classes)
+        expected_classes: parseInt(newCourse.expected_classes),
+        created_at: serverTimestamp()
       });
       setNewCourse({ code: '', title: '', level: '', department: '', required_attendance: '70', expected_classes: '10' });
       setShowAddCourse(false);
       fetchCourses();
       fetchCourseStats();
       setStatus({ type: 'success', message: 'Course created successfully' });
-    } catch (err) {
-      setStatus({ type: 'error', message: 'Failed to create course' });
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.CREATE, 'courses');
     } finally {
       setLoading(false);
     }
@@ -833,23 +958,42 @@ const LecturerDashboard = ({ user, onLogout }: { user: User; onLogout: () => voi
 
     const start = async (lat: number, lng: number) => {
       try {
-        const res = await api.post('/sessions', {
+        const qr_token = crypto.randomUUID();
+        const expires_at = new Date(Date.now() + 60 * 1000).toISOString();
+        
+        // Deactivate other sessions for this course
+        const activeQ = query(collection(db, 'sessions'), where('course_id', '==', selectedCourse.id), where('is_active', '==', true));
+        const activeSnap = await getDocs(activeQ);
+        const batch = writeBatch(db);
+        activeSnap.docs.forEach(doc => batch.update(doc.ref, { is_active: false }));
+        await batch.commit();
+
+        const docRef = await addDoc(collection(db, 'sessions'), {
           course_id: selectedCourse.id,
-          latitude: lat,
-          longitude: lng,
-          radius_meters: radius
-        });
-        setActiveSession({
-          ...res.data,
-          course_id: selectedCourse.id,
+          lecturer_id: user.id,
+          qr_token,
           latitude: lat,
           longitude: lng,
           radius_meters: radius,
+          expires_at,
+          is_active: true,
+          created_at: serverTimestamp()
+        });
+
+        setActiveSession({
+          id: docRef.id,
+          course_id: selectedCourse.id,
+          lecturer_id: user.id,
+          qr_token,
+          latitude: lat,
+          longitude: lng,
+          radius_meters: radius,
+          expires_at,
           is_active: true
         });
         setStatus({ type: 'success', message: 'Attendance session started' });
-      } catch (err) {
-        setStatus({ type: 'error', message: 'Failed to start session' });
+      } catch (err: any) {
+        handleFirestoreError(err, OperationType.CREATE, 'sessions');
       } finally {
         setLoading(false);
       }
@@ -876,16 +1020,26 @@ const LecturerDashboard = ({ user, onLogout }: { user: User; onLogout: () => voi
 
   const rotateQR = async () => {
     if (!activeSession) return;
-    const res = await api.post(`/sessions/rotate/${activeSession.id}`);
-    setActiveSession(prev => prev ? { ...prev, qr_token: res.data.qr_token } : null);
+    try {
+      const qr_token = crypto.randomUUID();
+      const expires_at = new Date(Date.now() + 60 * 1000).toISOString();
+      await updateDoc(doc(db, 'sessions', activeSession.id), { qr_token, expires_at });
+      setActiveSession(prev => prev ? { ...prev, qr_token, expires_at } : null);
+    } catch (err) {
+      console.error("Rotate error:", err);
+    }
   };
 
   const endSession = async () => {
     if (!activeSession) return;
-    await api.post(`/sessions/end/${activeSession.id}`);
-    setActiveSession(null);
-    setStatus({ type: 'info', message: 'Session ended' });
-    fetchCourseStats();
+    try {
+      await updateDoc(doc(db, 'sessions', activeSession.id), { is_active: false });
+      setActiveSession(null);
+      setStatus({ type: 'info', message: 'Session ended' });
+      fetchCourseStats();
+    } catch (err) {
+      console.error("End session error:", err);
+    }
   };
 
   const downloadCSV = (data: any[], filename: string) => {
@@ -910,7 +1064,7 @@ const LecturerDashboard = ({ user, onLogout }: { user: User; onLogout: () => voi
             <div className="bg-navy-900 rounded-3xl p-8 text-white shadow-xl relative overflow-hidden">
               <div className="relative z-10">
                 <h2 className="text-3xl font-bold mb-2">Lecturer Portal</h2>
-                <p className="text-navy-100 opacity-80">{user.department} • Staff ID: {user.staff_id}</p>
+                <p className="text-navy-100 opacity-80">{user.department} • Email: {user.email}</p>
                 <div className="mt-8 grid grid-cols-2 gap-4">
                   <div className="bg-white/10 backdrop-blur-md rounded-2xl p-4">
                     <div className="text-2xl font-bold">{courses.length}</div>
@@ -1057,14 +1211,49 @@ const LecturerDashboard = ({ user, onLogout }: { user: User; onLogout: () => voi
                       className="flex-1 rounded-xl"
                       onClick={async () => {
                         setSelectedCourse(course);
-                        const res = await api.get(`/analytics/course/${course.id}`);
-                        setSessionAttendance(res.data.attendance.map((a: any) => ({
-                          ...a,
-                          percentage: res.data.expectedClasses > 0 ? Math.round((a.attended / res.data.expectedClasses) * 100) : 0,
-                          currentPercentage: res.data.totalSessionsHeld > 0 ? Math.round((a.attended / res.data.totalSessionsHeld) * 100) : 0
-                        })));
-                        setShowStudentsModal(true);
-                        setSelectedSession({ id: 'overall', isOverall: true });
+                        setLoading(true);
+                        try {
+                          // Fetch student list for course
+                          const regQ = query(collection(db, 'course_registrations'), where('course_id', '==', course.id));
+                          const regSnap = await getDocs(regQ);
+                          
+                          // Fetch sessions held for this course
+                          const sessQ = query(collection(db, 'sessions'), where('course_id', '==', course.id));
+                          const sessSnap = await getDocs(sessQ);
+                          const totalExpected = course.expected_classes || 10;
+                          const totalHeld = sessSnap.size;
+
+                          const students = await Promise.all(regSnap.docs.map(async (regDoc) => {
+                            const regData = regDoc.data();
+                            const uSnap = await getDoc(doc(db, 'users', regData.student_id));
+                            const uData = uSnap.data();
+                            
+                            // Count student's attendance for this course
+                            const attQ = query(
+                              collection(db, 'attendance'), 
+                              where('student_id', '==', regData.student_id)
+                            );
+                            const attSnap = await getDocs(attQ);
+                            // Filter locally for this course's sessions
+                            const sessionIds = sessSnap.docs.map(d => d.id);
+                            const attendedCount = attSnap.docs.filter(d => sessionIds.includes(d.data().session_id)).length;
+                            
+                            return {
+                              name: uData?.name || 'Unknown',
+                              matric_number: uData?.matric_number || 'N/A',
+                              attended: attendedCount,
+                              percentage: totalExpected > 0 ? Math.round((attendedCount / totalExpected) * 100) : 0
+                            };
+                          }));
+
+                          setSessionAttendance(students);
+                          setShowStudentsModal(true);
+                          setSelectedSession({ id: 'overall', isOverall: true });
+                        } catch (err) {
+                          console.error(err);
+                        } finally {
+                          setLoading(false);
+                        }
                       }}
                     >
                       Students
@@ -1074,15 +1263,37 @@ const LecturerDashboard = ({ user, onLogout }: { user: User; onLogout: () => voi
                       size="sm" 
                       className="flex-1 rounded-xl"
                       onClick={async () => {
-                        const res = await api.get(`/analytics/course/${course.id}`);
-                        const csvData = res.data.attendance.map((a: any) => ({
-                          Name: a.name,
-                          Matric: a.matric_number,
-                          Attended: a.attended,
-                          Total: res.data.totalSessions,
-                          Percentage: res.data.totalSessions > 0 ? `${Math.round((a.attended / res.data.totalSessions) * 100)}%` : '0%'
-                        }));
-                        downloadCSV(csvData, `${course.course_code}_attendance.csv`);
+                        // Res-use the logic above to fetch data for CSV
+                        setLoading(true);
+                        try {
+                          const regQ = query(collection(db, 'course_registrations'), where('course_id', '==', course.id));
+                          const regSnap = await getDocs(regQ);
+                          const sessQ = query(collection(db, 'sessions'), where('course_id', '==', course.id));
+                          const sessSnap = await getDocs(sessQ);
+                          const sessionIds = sessSnap.docs.map(d => d.id);
+
+                          const students = await Promise.all(regSnap.docs.map(async (regDoc) => {
+                            const regData = regDoc.data();
+                            const uSnap = await getDoc(doc(db, 'users', regData.student_id));
+                            const uData = uSnap.data();
+                            const attQ = query(collection(db, 'attendance'), where('student_id', '==', regData.student_id));
+                            const attSnap = await getDocs(attQ);
+                            const attendedCount = attSnap.docs.filter(d => sessionIds.includes(d.data().session_id)).length;
+                            
+                            return {
+                              Name: uData?.name || 'Unknown',
+                              Matric: uData?.matric_number || 'N/A',
+                              Attended: attendedCount,
+                              Total: sessSnap.size,
+                              Percentage: sessSnap.size > 0 ? `${Math.round((attendedCount / sessSnap.size) * 100)}%` : '0%'
+                            };
+                          }));
+                          downloadCSV(students, `${course.course_code}_attendance.csv`);
+                        } catch (err) {
+                          console.error(err);
+                        } finally {
+                          setLoading(false);
+                        }
                       }}
                     >
                       CSV
@@ -1405,29 +1616,111 @@ const StudentPortal = ({ user, onLogout, setUser }: { user: User; onLogout: () =
         fetchAvailableCourses(),
         fetchAttendanceHistory(historyDate)
       ]);
+    } catch (e) {
+      console.error("Refresh error:", e);
     } finally {
       setLoading(false);
     }
   };
 
   const fetchSemesters = async () => {
-    const res = await api.get('/student/semesters');
-    setRegisteredSemesters(res.data);
+    try {
+      const q = query(collection(db, 'semester_registrations'), where('student_id', '==', user.id));
+      const snap = await getDocs(q);
+      setRegisteredSemesters(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    } catch (e) {
+      console.error("Fetch semesters error:", e);
+    }
   };
 
   const fetchAttendance = async () => {
-    const res = await api.get('/student/attendance');
-    setAttendanceStats(res.data);
+    try {
+      const regQ = query(collection(db, 'course_registrations'), where('student_id', '==', user.id));
+      const regSnap = await getDocs(regQ);
+      const stats = await Promise.all(regSnap.docs.map(async (regDoc) => {
+        const regData = regDoc.data();
+        const cSnap = await getDoc(doc(db, 'courses', regData.course_id));
+        const cData = cSnap.data();
+        
+        // Sessions held for this course
+        const sessQ = query(collection(db, 'sessions'), where('course_id', '==', regData.course_id));
+        const sessSnap = await getDocs(sessQ);
+        const sessionsHeld = sessSnap.size;
+        
+        // Student's attendance for this course
+        const attQ = query(
+          collection(db, 'attendance'), 
+          where('student_id', '==', user.id)
+        );
+        const attSnap = await getDocs(attQ);
+        const courseSessIds = sessSnap.docs.map(d => d.id);
+        const attended = attSnap.docs.filter(d => courseSessIds.includes(d.data().session_id)).length;
+        
+        return {
+          id: regData.course_id,
+          course_code: cData?.course_code || 'N/A',
+          course_title: cData?.course_title || 'N/A',
+          attended_sessions: attended,
+          total_sessions_held: sessionsHeld,
+          expected_classes: cData?.expected_classes || 10,
+          attended: attended // for backward compatibility in the calculation
+        };
+      }));
+      setAttendanceStats(stats);
+    } catch (e) {
+      console.error("Fetch attendance error:", e);
+    }
   };
 
   const fetchAvailableCourses = async () => {
-    const res = await api.get('/courses/available');
-    setAvailableCourses(res.data);
+    try {
+      const q = query(
+        collection(db, 'courses'), 
+        where('department', '==', user.department),
+        where('level', '==', user.level)
+      );
+      const snap = await getDocs(q);
+      const allCourses = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      
+      // Filter out already registered
+      const regQ = query(collection(db, 'course_registrations'), where('student_id', '==', user.id));
+      const regSnap = await getDocs(regQ);
+      const regIds = regSnap.docs.map(d => d.data().course_id);
+      
+      setAvailableCourses(allCourses.filter(c => !regIds.includes(c.id)));
+    } catch (e) {
+      console.error("Fetch available courses error:", e);
+    }
   };
 
   const fetchAttendanceHistory = async (date: string) => {
-    const res = await api.get(`/student/attendance/history?date=${date}`);
-    setAttendanceHistory(res.data);
+    try {
+      const start = new Date(date);
+      start.setHours(0,0,0,0);
+      const end = new Date(date);
+      end.setHours(23,59,59,999);
+      
+      const q = query(
+        collection(db, 'attendance'), 
+        where('student_id', '==', user.id),
+        where('marked_at', '>=', Timestamp.fromDate(start)),
+        where('marked_at', '<=', Timestamp.fromDate(end))
+      );
+      const snap = await getDocs(q);
+      const history = await Promise.all(snap.docs.map(async (aDoc) => {
+        const aData = aDoc.data();
+        const cSnap = await getDoc(doc(db, 'courses', aData.course_id));
+        const cData = cSnap.data();
+        return {
+          course_code: cData?.course_code || 'N/A',
+          course_title: cData?.course_title || 'N/A',
+          marked_at: aData.marked_at.toDate().toISOString()
+        };
+      }));
+      setAttendanceHistory(history);
+    } catch (e) {
+      console.error("Fetch attendance history error:", e);
+    }
   };
 
   const registerCourse = async (courseId: string) => {
@@ -1437,11 +1730,16 @@ const StudentPortal = ({ user, onLogout, setUser }: { user: User; onLogout: () =
     }
     setLoading(true);
     try {
-      await api.post('/courses/register', { course_id: courseId, semester: selectedSemester });
+      await addDoc(collection(db, 'course_registrations'), {
+        student_id: user.id,
+        course_id: courseId,
+        semester: selectedSemester,
+        registered_at: serverTimestamp()
+      });
       refreshData();
       setStatus({ type: 'success', message: 'Registered successfully' });
     } catch (err: any) {
-      setStatus({ type: 'error', message: err.response?.data?.error || 'Failed to register' });
+      handleFirestoreError(err, OperationType.CREATE, 'course_registrations');
     } finally {
       setLoading(false);
     }
@@ -1451,11 +1749,19 @@ const StudentPortal = ({ user, onLogout, setUser }: { user: User; onLogout: () =
     if (!confirm('Are you sure you want to unregister from this course?')) return;
     setLoading(true);
     try {
-      await api.post('/courses/unregister', { course_id: courseId });
+      const q = query(
+        collection(db, 'course_registrations'), 
+        where('student_id', '==', user.id),
+        where('course_id', '==', courseId)
+      );
+      const snap = await getDocs(q);
+      const batch = writeBatch(db);
+      snap.docs.forEach(doc => batch.delete(doc.ref));
+      await batch.commit();
       refreshData();
       setStatus({ type: 'success', message: 'Unregistered successfully' });
     } catch (err: any) {
-      setStatus({ type: 'error', message: err.response?.data?.error || 'Failed to unregister' });
+      handleFirestoreError(err, OperationType.DELETE, 'course_registrations');
     } finally {
       setLoading(false);
     }
@@ -1490,15 +1796,50 @@ const StudentPortal = ({ user, onLogout, setUser }: { user: User; onLogout: () =
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         try {
-          const res = await api.post('/attendance/mark', {
-            qr_token: decodedText,
+          // Find session by token
+          const q = query(
+            collection(db, 'sessions'), 
+            where('qr_token', '==', decodedText),
+            where('is_active', '==', true)
+          );
+          const snap = await getDocs(q);
+          
+          if (snap.empty) {
+            throw new Error('Invalid or expired QR code');
+          }
+          
+          const sessionDoc = snap.docs[0];
+          const sessionData = sessionDoc.data();
+          
+          // Check expiration
+          if (new Date(sessionData.expires_at) < new Date()) {
+            throw new Error('Session has expired');
+          }
+
+          // Check distance
+          const distance = calculateDistance(
+            pos.coords.latitude, pos.coords.longitude,
+            sessionData.latitude, sessionData.longitude
+          );
+          
+          if (distance > sessionData.radius_meters) {
+            throw new Error(`You are too far away (${Math.round(distance)}m). You must be within ${sessionData.radius_meters}m.`);
+          }
+
+          // Mark attendance
+          await addDoc(collection(db, 'attendance'), {
+            student_id: user.id,
+            session_id: sessionDoc.id,
+            course_id: sessionData.course_id,
+            marked_at: serverTimestamp(),
             latitude: pos.coords.latitude,
             longitude: pos.coords.longitude
           });
-          setStatus({ type: 'success', message: res.data.message });
+
+          setStatus({ type: 'success', message: 'Attendance marked successfully!' });
           fetchAttendance();
         } catch (err: any) {
-          setStatus({ type: 'error', message: err.response?.data?.error || 'Failed to mark attendance' });
+          setStatus({ type: 'error', message: err.message || 'Failed to mark attendance' });
         } finally {
           setLoading(false);
         }
@@ -1855,16 +2196,18 @@ const StudentPortal = ({ user, onLogout, setUser }: { user: User; onLogout: () =
                       onboarding_completed: true
                     };
                     try {
-                      await api.put('/profile', data);
-                      const res = await api.get('/profile');
+                      await updateDoc(doc(db, 'users', user.id), data);
+                      const userSnap = await getDoc(doc(db, 'users', user.id));
                       setStatus({ type: 'success', message: 'Profile updated successfully!' });
                       setTimeout(() => {
-                        setUser(res.data);
+                        if (userSnap.exists()) {
+                          setUser({ id: userSnap.id, ...userSnap.data() } as User);
+                        }
                         setIsEditingProfile(false);
                         setStatus(null);
                       }, 2000);
                     } catch (err: any) {
-                      setStatus({ type: 'error', message: err.response?.data?.error || 'Failed to update profile' });
+                      handleFirestoreError(err, OperationType.UPDATE, 'users');
                     } finally {
                       setLoading(false);
                     }
@@ -2181,29 +2524,36 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (token) {
-      fetchProfile();
-    } else {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        try {
+          const userSnap = await getDoc(doc(db, 'users', firebaseUser.uid));
+          if (userSnap.exists()) {
+            setUser({ id: userSnap.id, ...userSnap.data() } as User);
+          } else {
+            // Profile doc might not exist yet if just registered, handled in Login
+            setUser(null);
+          }
+        } catch (e) {
+          console.error("Error fetching profile:", e);
+          setUser(null);
+        }
+      } else {
+        setUser(null);
+      }
       setLoading(false);
-    }
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  const fetchProfile = async () => {
+  const handleLogout = async () => {
     try {
-      const res = await api.get('/profile');
-      setUser(res.data);
-    } catch (e) {
-      localStorage.removeItem('token');
+      await signOut(auth);
       setUser(null);
-    } finally {
-      setLoading(false);
+    } catch (e) {
+      console.error("Logout error:", e);
     }
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    setUser(null);
   };
 
   if (loading) return (
