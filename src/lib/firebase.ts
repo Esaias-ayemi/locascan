@@ -15,11 +15,6 @@ const firebaseConfig: FirebaseOptions = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || localConfig.appId || '',
 };
 
-console.log('Firebase initializing with Project ID:', firebaseConfig.projectId ? firebaseConfig.projectId : '[MISSING]');
-if (!firebaseConfig.apiKey) {
-  console.error("FIREBASE CONFIGURATION MISSING! Ensure VITE_FIREBASE_API_KEY is set in your deployment environment and rebuild.");
-}
-
 const app = initializeApp(firebaseConfig);
 const databaseId = import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || localConfig.firestoreDatabaseId || '(default)';
 export const db = getFirestore(app, databaseId);

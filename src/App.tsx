@@ -2523,11 +2523,9 @@ const LecturerLayout = ({ user, onLogout, children, activeTab, setActiveTab }: {
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [globalError, setGlobalError] = useState<string | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      setGlobalError(null);
       if (firebaseUser) {
         try {
           const userSnap = await getDoc(doc(db, 'users', firebaseUser.uid));
@@ -2537,10 +2535,9 @@ export default function App() {
             // Profile doc might not exist yet if just registered, handled in Login
             setUser(null);
           }
-        } catch (e: any) {
+        } catch (e) {
           console.error("Error fetching profile:", e);
           setUser(null);
-          setGlobalError(e.message || "Could not connect to Firestore Database. Please check your configuration.");
         }
       } else {
         setUser(null);
@@ -2568,11 +2565,6 @@ export default function App() {
 
   return (
     <Router>
-      {globalError && (
-        <div className="fixed top-0 left-0 right-0 z-50 bg-red-500 text-white p-4 text-center font-medium shadow-md">
-          {globalError}
-        </div>
-      )}
       <Routes>
         <Route path="/" element={
           !user ? <LandingPage /> : (
